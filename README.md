@@ -10,11 +10,6 @@
   <a href="https://huggingface.co/SJTU-Deng-Lab"><b>🤗 Hugging Face</b></a>
 </p>
 
-<p align="center">
-  <a href="https://discord.gg/placeholder"><b>💬 Discord</b></a> •
-  <a href="docs/assets/img/wechat.png"><b>💬 Wechat</b></a>
-</p>
-
 
 <p align="center">
   <br>
@@ -214,3 +209,4 @@ If you find LOPA useful for your research, please cite our paper:
 }
 
 ```
+
