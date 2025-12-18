@@ -603,14 +603,14 @@ class DiffuCoderBasic(DiffuCoder):
         self.model, self.tokenizer = self._load_dream_model()
 
     def codegen(self, prompt: str, do_sample: bool = True, num_samples: int = 200) -> List[str]:
-        # 按 infer_diffucoder：严格单样本调用 diffusion_generate；如需多个样本，循环多次
+        # Match infer_diffucoder: always call diffusion_generate once; loop for multiple samples.
         if do_sample:
             self._set_seed(1234)
 
         formatted_prompt = self._build_prompt(prompt)
         results: List[str] = []
 
-        # 计算 steps：max_new_tokens // token_per_step（至少 1）
+        # Compute steps as max_new_tokens // token_per_step (at least 1).
         steps = max(1, int(self.max_new_tokens // self.basic_token_per_step))
 
         for _ in range(num_samples):
@@ -633,7 +633,7 @@ class DiffuCoderBasic(DiffuCoder):
                 alg_temp=self.basic_alg_temp,
             )
             elapsed = time.time() - start_time
-            # 记录一次 forward（保守用 steps 次）
+            # Record one forward pass (conservatively count steps).
             self._record_forward_pass(steps)
 
             seq = outputs.sequences[0].detach().cpu()
@@ -656,7 +656,7 @@ class DiffuCoderBasic(DiffuCoder):
         return results
 
     def _load_dream_model(self):
-        # 使用远程实现，和 infer_diffucoder 完全一致，避免本地 DreamModel 的 mask 语义不一致
+        # Use the remote implementation to stay consistent with infer_diffucoder and avoid local mask mismatches.
         from transformers import AutoModel
         print(f"Loading base model (basic) from: {self.base_model_path}")
         model = AutoModel.from_pretrained(
@@ -665,7 +665,7 @@ class DiffuCoderBasic(DiffuCoder):
             trust_remote_code=True,
         ).eval()
 
-        # 设备/精度放在最后
+        # Apply dtype/device placement last.
         if self.target_dtype is not None:
             model = model.to(self.target_dtype)
         model = model.to(self.device)

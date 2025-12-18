@@ -7,7 +7,7 @@ TP=${3:-1}
 OUTPUT_DIR=${4:-"results/diffucoder_0.3_0.9_0.95"}
 DEVICE=${5:-"cuda:1"}
 
-# [NEW] 新增参数控制 (根据 Output Dir 命名推测的默认值)
+# [NEW] Additional knobs inferred from output-dir naming defaults
 BLOCK_SIZE=32
 BLOCK_ADD_THRESHOLD=0.3
 SKIP_THRESHOLD=0.9

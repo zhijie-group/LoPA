@@ -74,13 +74,24 @@
 # limitations under the License.
 """PyTorch Dream model."""
 from transformers import Qwen2Model
-# from torch.nn.attention.flex_attention import flex_attention
+import inspect
 import math
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass
 import os
 import torch
+import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
+from contextlib import nullcontext
+
+try:  # torch>=2.3 style SDPA interface
+    from torch.nn.attention import sdpa_kernel as torch_nn_sdpa_kernel, SDPBackend
+except (ImportError, AttributeError):  # pragma: no cover - older torch
+    torch_nn_sdpa_kernel = None
+    SDPBackend = None
+    
+from einops import rearrange
 
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
@@ -102,8 +113,18 @@ from transformers.utils import (
 from transformers import PretrainedConfig
 from model_cache.dream.configuration_dream import DreamConfig
 from model_cache.dream.generation_utils import DreamGenerationMixin, DreamGenerationConfig
+from model_cache.dream.parallel_utils import ParallelConfig, configure_model_for_tp_pp
+from d2fpp.model.utils.compile_control import optional_compile
 if is_flash_attn_2_available():
+    from flash_attn import flash_attn_func
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
+
+try:
+    from sageattention import sageattn
+    _SAGE_ATTENTION_AVAILABLE = True
+except ImportError:
+    sageattn = None
+    _SAGE_ATTENTION_AVAILABLE = False
 
 
 logger = logging.get_logger(__name__)
@@ -113,25 +134,134 @@ _CHECKPOINT_FOR_DOC = "Dream-7B"
 _CONFIG_FOR_DOC = "DreamConfig"
 
 
-# Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Dream
-class DreamRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        DreamRMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
+try:
+    _SDPA_SUPPORTS_ENABLE_GQA = "enable_gqa" in inspect.signature(torch.nn.functional.scaled_dot_product_attention).parameters
+except (ValueError, TypeError):
+    _SDPA_SUPPORTS_ENABLE_GQA = True
 
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+if torch_nn_sdpa_kernel is not None:
+    _SDPA_KERNEL_FACTORY = torch_nn_sdpa_kernel
+else:
+    _SDPA_KERNEL_FACTORY = getattr(getattr(torch.backends, "cuda", None), "sdp_kernel", None)
 
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+_SDPA_KERNEL_ACCEPTS_BACKENDS = False
+if _SDPA_KERNEL_FACTORY is not None:
+    try:
+        _SDPA_KERNEL_ACCEPTS_BACKENDS = "backends" in inspect.signature(_SDPA_KERNEL_FACTORY).parameters
+    except (ValueError, TypeError):  # pragma: no cover - builtins without signature
+        _SDPA_KERNEL_ACCEPTS_BACKENDS = False
+
+
+_FLASH_ATTENTION_SIGNATURE = None
+_FLASH_ATTENTION_SIGNATURE_UNAVAILABLE = object()
+
+
+def _get_flash_attention_signature() -> Optional[inspect.Signature]:
+    global _FLASH_ATTENTION_SIGNATURE
+    if _FLASH_ATTENTION_SIGNATURE is _FLASH_ATTENTION_SIGNATURE_UNAVAILABLE:
+        return None
+    if _FLASH_ATTENTION_SIGNATURE is None:
+        try:
+            _FLASH_ATTENTION_SIGNATURE = inspect.signature(_flash_attention_forward)
+        except (NameError, ValueError, TypeError):
+            _FLASH_ATTENTION_SIGNATURE = _FLASH_ATTENTION_SIGNATURE_UNAVAILABLE
+            return None
+    return _FLASH_ATTENTION_SIGNATURE
+
+
+def _sdpa_kernel_context(enable_flash: bool, enable_math: bool, enable_mem_efficient: bool):
+    if _SDPA_KERNEL_FACTORY is None:
+        return nullcontext()
+    if _SDPA_KERNEL_ACCEPTS_BACKENDS:
+        if SDPBackend is None:
+            return nullcontext()
+        backends = []
+        if enable_flash:
+            backends.append(SDPBackend.FLASH_ATTENTION)
+        if enable_math:
+            backends.append(SDPBackend.MATH)
+        if enable_mem_efficient:
+            backends.append(SDPBackend.EFFICIENT_ATTENTION)
+        if not backends:
+            return nullcontext()
+        return _SDPA_KERNEL_FACTORY(backends)
+    return _SDPA_KERNEL_FACTORY(
+        enable_flash=enable_flash,
+        enable_math=enable_math,
+        enable_mem_efficient=enable_mem_efficient,
+    )
+
+
+# Use PyTorch native RMSNorm if available (PyTorch 2.9+), otherwise fallback to custom implementation
+# Check for both nn.RMSNorm class and F.rms_norm function
+_HAS_NATIVE_RMSNORM_CLASS = hasattr(nn, "RMSNorm")
+_HAS_NATIVE_RMSNORM_FUNC = hasattr(F, "rms_norm")
+
+if _HAS_NATIVE_RMSNORM_CLASS:
+    # Use PyTorch native RMSNorm class (preferred)
+    class DreamRMSNorm(nn.RMSNorm):
+        def __init__(self, hidden_size, eps=1e-6):
+            """
+            DreamRMSNorm using PyTorch native RMSNorm class (PyTorch 2.9+).
+            Equivalent to T5LayerNorm.
+            """
+            # PyTorch's RMSNorm uses eps=1e-8 by default, but we use 1e-6 for compatibility
+            super().__init__(normalized_shape=hidden_size, eps=eps, elementwise_affine=True)
+            # Alias for backward compatibility
+            self.variance_epsilon = eps
+        
+        def extra_repr(self):
+            return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+elif _HAS_NATIVE_RMSNORM_FUNC:
+    # Use PyTorch native rms_norm function with wrapper
+    class DreamRMSNorm(nn.Module):
+        def __init__(self, hidden_size, eps=1e-6):
+            """
+            DreamRMSNorm using PyTorch native rms_norm function (PyTorch 2.9+).
+            Equivalent to T5LayerNorm.
+            """
+            super().__init__()
+            self.normalized_shape = hidden_size
+            self.variance_epsilon = eps
+            self.weight = nn.Parameter(torch.ones(hidden_size))
+        
+        def forward(self, hidden_states):
+            """
+            Apply RMSNorm using torch.nn.functional.rms_norm.
+            Reference: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.rms_norm.html
+            """
+            return F.rms_norm(
+                hidden_states,
+                normalized_shape=self.normalized_shape,
+                weight=self.weight,
+                eps=self.variance_epsilon
+            )
+        
+        def extra_repr(self):
+            return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+else:
+    # Fallback to custom implementation for older PyTorch versions
+    # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Dream
+    class DreamRMSNorm(nn.Module):
+        def __init__(self, hidden_size, eps=1e-6):
+            """
+            DreamRMSNorm is equivalent to T5LayerNorm
+            Custom implementation for PyTorch < 2.9
+            """
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(hidden_size))
+            self.variance_epsilon = eps
+
+        def forward(self, hidden_states):
+            input_dtype = hidden_states.dtype
+            hidden_states = hidden_states.to(torch.float32)
+            variance = hidden_states.pow(2).mean(-1, keepdim=True)
+            hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+            return self.weight * hidden_states.to(input_dtype)
+
+        def extra_repr(self):
+            return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRotaryEmbedding with Llama->Dream
@@ -291,6 +421,145 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+@dataclass
+class CacheUpdate:
+    layer_idx: int
+    start: int
+    end: int
+
+
+class SharedStaticCache:
+    """Shared KV cache backed by contiguous tensors for all decoder layers."""
+
+    def __init__(
+        self,
+        num_layers: int,
+        num_key_value_heads: int,
+        max_seq_len: int,
+        head_dim: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> None:
+        shape = (num_layers, num_key_value_heads, max_seq_len, head_dim)
+        self.key = torch.zeros(shape, device=device, dtype=dtype)
+        self.value = torch.zeros_like(self.key)
+        self._layer_lengths = torch.zeros(num_layers, device=device, dtype=torch.long)
+        self.seq_length: int = 0
+        self.max_seq_len = max_seq_len
+
+    def reset(self) -> None:
+        self._layer_lengths.zero_()
+        self.seq_length = 0
+
+    def get_seq_length(self) -> int:
+        return int(self.seq_length)
+
+    def set_seq_length(self, length: int) -> None:
+        length = int(length)
+        self.seq_length = min(length, self.max_seq_len)
+        self._layer_lengths.fill_(self.seq_length)
+
+    def get_layer_length(self, layer_idx: int) -> int:
+        if layer_idx < 0 or layer_idx >= self._layer_lengths.numel():
+            raise IndexError(f"Invalid layer index {layer_idx}")
+        return int(self._layer_lengths[layer_idx].item())
+
+    def get_layer_prefix(self, layer_idx: int) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        length = self.get_layer_length(layer_idx)
+        if length <= 0:
+            return None, None
+        key_slice = self.key[layer_idx, :, :length, :].unsqueeze(0)
+        value_slice = self.value[layer_idx, :, :length, :].unsqueeze(0)
+        return key_slice, value_slice
+
+    def append(self, layer_idx: int, key_chunk: torch.Tensor, value_chunk: torch.Tensor) -> Optional[CacheUpdate]:
+        if key_chunk is None or value_chunk is None:
+            return None
+        if key_chunk.dim() != 4 or value_chunk.dim() != 4:
+            raise ValueError("KV chunks must be 4D tensors (batch, heads, seq, dim)")
+        if key_chunk.shape[0] != 1 or value_chunk.shape[0] != 1:
+            raise ValueError("Static cache currently supports batch size 1")
+        update_len = key_chunk.shape[2]
+        if update_len <= 0:
+            return None
+        start = self.get_layer_length(layer_idx)
+        end = start + update_len
+        if end > self.max_seq_len:
+            raise ValueError(
+                f"KV cache capacity exceeded: trying to write up to position {end}, "
+                f"but cache was allocated for {self.max_seq_len} positions."
+            )
+        key_tensor = key_chunk.to(dtype=self.key.dtype, device=self.key.device, non_blocking=True).squeeze(0).contiguous()
+        value_tensor = value_chunk.to(dtype=self.value.dtype, device=self.value.device, non_blocking=True).squeeze(0).contiguous()
+        self.key[layer_idx, :, start:end, :].copy_(key_tensor)
+        self.value[layer_idx, :, start:end, :].copy_(value_tensor)
+        self._layer_lengths[layer_idx] = end
+        self.seq_length = max(self.seq_length, end)
+        return CacheUpdate(layer_idx=layer_idx, start=start, end=end)
+
+    def write_block(self, layer_idx: int, start: int, key_block: torch.Tensor, value_block: torch.Tensor) -> int:
+        if key_block.dim() != 4 or value_block.dim() != 4:
+            raise ValueError("KV blocks must be 4D tensors (batch, heads, seq, dim)")
+        if key_block.shape[0] != 1 or value_block.shape[0] != 1:
+            raise ValueError("Static cache currently supports batch size 1")
+        update_len = key_block.shape[2]
+        end = start + update_len
+        if end > self.max_seq_len:
+            raise ValueError(
+                f"KV cache capacity exceeded while writing block: end {end} > max_seq_len {self.max_seq_len}"
+            )
+        key_tensor = key_block.to(dtype=self.key.dtype, device=self.key.device, non_blocking=True).squeeze(0).contiguous()
+        value_tensor = value_block.to(dtype=self.value.dtype, device=self.value.device, non_blocking=True).squeeze(0).contiguous()
+        self.key[layer_idx, :, start:end, :].copy_(key_tensor)
+        self.value[layer_idx, :, start:end, :].copy_(value_tensor)
+        self._layer_lengths[layer_idx] = max(int(self._layer_lengths[layer_idx].item()), end)
+        self.seq_length = max(self.seq_length, end)
+        return end
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Update the cache with new key and value states, compatible with DynamicCache.update interface.
+        
+        Args:
+            key_states: New key states to append [batch, num_heads, seq_len, head_dim]
+            value_states: New value states to append [batch, num_heads, seq_len, head_dim]
+            layer_idx: Layer index
+            cache_kwargs: Optional cache kwargs (unused for SharedStaticCache)
+        
+        Returns:
+            Tuple of (updated_key_states, updated_value_states) containing the full cached sequence
+        """
+        # Append new states to cache
+        self.append(layer_idx, key_states, value_states)
+        
+        # Return the full cached sequence for this layer
+        length = self.get_layer_length(layer_idx)
+        if length <= 0:
+            return key_states, value_states
+        
+        # Get the full cached sequence (including newly appended)
+        key_slice = self.key[layer_idx, :, :length, :].unsqueeze(0)  # [1, num_heads, length, head_dim]
+        value_slice = self.value[layer_idx, :, :length, :].unsqueeze(0)  # [1, num_heads, length, head_dim]
+        
+        return key_slice, value_slice
+
+    def get_block(self, layer_idx: int, start: int, end: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        if end > self.max_seq_len:
+            raise ValueError(f"Requested block [{start}, {end}) exceeds cache capacity {self.max_seq_len}")
+        key_slice = self.key[layer_idx, :, start:end, :].unsqueeze(0)
+        value_slice = self.value[layer_idx, :, start:end, :].unsqueeze(0)
+        return key_slice, value_slice
+
+    def __getitem__(self, layer_idx: int) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        return self.get_layer_prefix(layer_idx)
+
 class DreamAttention(nn.Module):
     """
     Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
@@ -340,7 +609,7 @@ class DreamAttention(nn.Module):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Union[Cache, CacheUpdate]]]:
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -371,15 +640,45 @@ class DreamAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
+        attn_output = None
+        attn_weights = None
+        dropout_p = self.attention_dropout if self.training else 0.0
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
+        attn_mask = None
+        if attention_mask is not None:
+            attn_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            attn_mask = attn_mask.to(dtype=query_states.dtype, device=query_states.device)
+
+        use_sdpa = (
+            self.config.attn_implementation in {"sdpa", "flash_attention_2"}
+            and not output_attentions
+        )
+
+        if use_sdpa:
+            try:
+                attn_output = F.scaled_dot_product_attention(
+                    query_states,
+                    key_states,
+                    value_states,
+                    attn_mask=attn_mask,
+                    dropout_p=dropout_p,
+                    is_causal=False,
+                )
+            except RuntimeError as exc:
+                logger.warning_once(
+                    "Falling back to eager attention due to scaled_dot_product_attention error: %s", str(exc)
+                )
+                attn_output = None
+
+        if attn_output is None:
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+            if attn_mask is not None:  # no matter the length, we just slice it
+                attn_weights = attn_weights + attn_mask
+
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(attn_weights, p=dropout_p, training=self.training)
+            attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -392,7 +691,13 @@ class DreamAttention(nn.Module):
 
         attn_output = self.o_proj(attn_output)
 
-        if not output_attentions:
+        if output_attentions and attn_weights is None:
+            # Recompute attention weights when SDPA path is taken and attn weights are requested.
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+            if attn_mask is not None:
+                attn_weights = attn_weights + attn_mask
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        elif not output_attentions:
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
@@ -410,7 +715,7 @@ class DreamSdpaAttention(DreamAttention):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        update_kvcache: torch.int32 = None,
+    update_kvcache: Optional[int] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
@@ -493,31 +798,211 @@ class DreamSdpaAttention(DreamAttention):
         attn_output = self.o_proj(attn_output)
 
         return attn_output, None, past_key_value
-class DreamFlexAttention(DreamAttention):
-    """
-    Dream attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
-    `DreamAttention` as the weights of the module stays untouched. The only changes are on the forward pass to adapt to
-    SDPA API.
-    """
+    
+    
+class DreamFastAttention(DreamAttention):
+    """Dream attention module prioritising FlashAttention/SDPA kernels with GQA support."""
+    def __init__(self, config: DreamConfig, layer_idx: Optional[int] = None):
+        super().__init__(config, layer_idx)
+        requested_impl = getattr(config, "_dream_attn_preference", None)
+        if requested_impl is None:
+            requested_impl = getattr(config, "attn_implementation", getattr(config, "_attn_implementation", "eager"))
+        self._prefer_flash = requested_impl in {"flash_attention_2", "sdpa_flash_attn", "sdpa_flash_attention"}
+        self._prefer_mem_eff = requested_impl in {"sdpa", "sdpa_flash_attn", "sdpa_flash_attention"}
+        self._warned_sdpa_failure = False
+        self._warned_flash_failure = False
+        self._use_sage = bool(getattr(config, "use_sage_attention", False))
+        self._warned_sage_failure = False
+        if self._use_sage and not _SAGE_ATTENTION_AVAILABLE:
+            logger.warning_once(
+                "SageAttention requested on layer %s but the kernel is unavailable; falling back to standard attention.",
+                layer_idx,
+            )
+            self._use_sage = False
 
-    # Adapted from DreamAttention.forward
+    def _run_flash_attention(
+        self,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        attn_mask: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        if not (self._prefer_flash and is_flash_attn_2_available()):
+            return None
+        if attn_mask is not None or query_states.device.type != "cuda":
+            return None
+        if query_states.dtype not in (torch.float16, torch.bfloat16):
+            return None
+        signature = _get_flash_attention_signature()
+        if signature is None:
+            return None
+
+        dropout_p = self.attention_dropout if self.training else 0.0
+        if dropout_p > 0.0 and not is_flash_attn_greater_or_equal_2_10():
+            dropout_p = 0.0
+
+        softmax_scale = 1.0 / math.sqrt(self.head_dim)
+        query_states = rearrange(query_states, "b h s d -> b s h d")
+        key_states = rearrange(key_states, "b h s d -> b s h d")
+        value_states = rearrange(value_states, "b h s d -> b s h d")
+        query = query_states if query_states.is_contiguous() else query_states.contiguous()
+        key = key_states if key_states.is_contiguous() else key_states.contiguous()
+        value = value_states if value_states.is_contiguous() else value_states.contiguous()
+
+        args = [query, key, value]
+        kwargs = {
+            "dropout_p": 0,
+            "softmax_scale": softmax_scale,
+            "causal": False,
+        }
+        # Dynamically adapt to different FlashAttention helper signatures across transformers versions.
+
+        try:
+            return flash_attn_func(*args, **kwargs)
+        except (RuntimeError, TypeError) as exc:
+            if not self._warned_flash_failure:
+                logger.warning_once(
+                    "FlashAttention failed on layer %s; falling back to SDPA: %s",
+                    self.layer_idx,
+                    str(exc),
+                )
+                self._warned_flash_failure = True
+        return None
+
+    def _run_sage_attention(
+        self,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        attn_mask: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        if not (self._use_sage and _SAGE_ATTENTION_AVAILABLE):
+            return None
+        if query_states.device.type != "cuda":
+            return None
+        if self.training and self.attention_dropout > 0.0:
+            return None
+
+        mask = attn_mask
+        if mask is not None:
+            if mask.device != query_states.device:
+                mask = mask.to(query_states.device)
+            valid_mask_dtypes = {torch.bool, torch.float16, torch.bfloat16, torch.float32}
+            if mask.dtype not in valid_mask_dtypes:
+                mask = mask.to(dtype=query_states.dtype)
+            mask = mask.contiguous()
+
+        
+        try:
+            return sageattn(
+                query_states.contiguous(),
+                key_states.contiguous(),
+                value_states.contiguous(),
+                tensor_layout="HND",
+                is_causal=False,
+            )
+        except Exception as exc:  # pragma: no cover - best-effort acceleration path
+            if not self._warned_sage_failure:
+                logger.warning_once(
+                    "SageAttention failed on layer %s; reverting to standard kernels: %s",
+                    self.layer_idx,
+                    str(exc),
+                )
+                self._warned_sage_failure = True
+            return None
+        
+    def _run_sdpa(
+        self,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        attn_mask: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        mask = attn_mask
+        dropout_p = self.attention_dropout if self.training else 0.0
+        sdpa_kwargs: dict = {}
+        if _SDPA_SUPPORTS_ENABLE_GQA:
+            sdpa_kwargs["enable_gqa"] = True
+
+        if mask is not None and mask.dtype != query_states.dtype:
+            mask = mask.to(dtype=query_states.dtype)
+
+        # flash_attn = self._run_flash_attention(query_states, key_states, value_states, mask)
+        # if flash_attn is not None:
+        #     return flash_attn
+
+        if (
+            query_states.device.type == "cuda"
+            and hasattr(torch.backends, "cuda")
+            and hasattr(torch.backends.cuda, "sdp_kernel")
+        ):
+            enable_flash = self._prefer_flash and mask is None
+            enable_mem_efficient = self._prefer_mem_eff and not enable_flash
+            try:
+                # with _sdpa_kernel_context(
+                #     enable_flash=enable_flash,
+                #     enable_math=True,
+                #     enable_mem_efficient=enable_mem_efficient,
+                # ):
+                with torch.nn.attention.sdpa_kernel(
+                    SDPBackend.FLASH_ATTENTION if enable_flash else
+                    SDPBackend.EFFICIENT_ATTENTION if enable_mem_efficient else
+                    SDPBackend.MATH
+                ):
+                    return F.scaled_dot_product_attention(
+                        query_states,
+                        key_states,
+                        value_states,
+                        attn_mask=mask,
+                        dropout_p=dropout_p,
+                        is_causal=False,
+                        **sdpa_kwargs,
+                    )
+            except RuntimeError as exc:
+                if not self._warned_sdpa_failure:
+                    logger.warning_once(
+                        "Falling back to math attention for layer %s due to SDPA failure: %s",
+                        self.layer_idx,
+                        str(exc),
+                    )
+                    self._warned_sdpa_failure = True
+
+        try:
+            return F.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=mask,
+                dropout_p=dropout_p,
+                is_causal=False,
+                **sdpa_kwargs,
+            )
+        except RuntimeError as exc:
+            if not self._warned_sdpa_failure:
+                logger.warning_once(
+                    "Scaled dot product attention failed on layer %s; reverting to manual attention: %s",
+                    self.layer_idx,
+                    str(exc),
+                )
+                self._warned_sdpa_failure = True
+        return None
+
+    # Adapted from DreamAttention.forward with partial-cache updates and fast kernels.
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        update_kvcache: torch.int32 = None,
+        update_kvcache: Optional[int] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
-            # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
             logger.warning_once(
-                "DreamModel is using DreamSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
-                'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                "DreamFastAttention does not expose attention weights. Fallback to eager attention by setting attn_implementation='eager'."
             )
             return super().forward(
                 hidden_states=hidden_states,
@@ -527,110 +1012,116 @@ class DreamFlexAttention(DreamAttention):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
             )
-        # print("hidden_states",hidden_states)
+
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = rearrange(query_states, "b s (h d) -> b h s d", h=self.num_heads)
+        key_states = rearrange(key_states, "b s (h d) -> b h s d", h=self.num_key_value_heads)
+        value_states = rearrange(value_states, "b s (h d) -> b h s d", h=self.num_key_value_heads)
+
+        commit_len = int(update_kvcache or 0)
+        static_cache: Optional[SharedStaticCache] = past_key_value if isinstance(past_key_value, SharedStaticCache) else None
+        cache_update: Optional[CacheUpdate] = None
+        commit_key_chunk: Optional[torch.Tensor] = None
+        commit_value_chunk: Optional[torch.Tensor] = None
 
         if position_embeddings is None:
             logger.warning_once(
                 "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
-                "removed and `position_embeddings` will be mandatory."
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed `position_embeddings`. "
+                "In v4.46 `position_ids` will be removed and `position_embeddings` will be mandatory."
             )
             cos, sin = self.rotary_emb(value_states, position_ids)
         else:
             cos, sin = position_embeddings
-        # print(query_states.shape,key_states.shape,cos.shape,sin.shape)
+
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        # print("k,v",key_states.shape,value_states.shape,past_key_value)
-        # print(cos.shape,sin.shape,cache_position.shape)
-        if past_key_value is not None:
-            if update_kvcache == 0:
-                past_key_states, past_value_states = past_key_value[self.layer_idx]
-                key_states=torch.cat([past_key_states, key_states], dim=2)
-                value_states=torch.cat([past_value_states, value_states], dim=2)
-  # Specific to RoPE models
+
+        if static_cache is not None:
+            if commit_len > 0:
+                commit_key_chunk = key_states[:, :, :commit_len, :].detach().contiguous()
+                commit_value_chunk = value_states[:, :, :commit_len, :].detach().contiguous()
+            cached_key, cached_value = static_cache.get_layer_prefix(self.layer_idx)
+            if cached_key is not None:
+                key_states = torch.cat([cached_key, key_states], dim=2)
+            if cached_value is not None:
+                value_states = torch.cat([cached_value, value_states], dim=2)
+        elif past_key_value is not None:
+            if not update_kvcache:
+                past_key, past_value = past_key_value[self.layer_idx]
+                key_states = torch.cat([past_key, key_states], dim=2)
+                value_states = torch.cat([past_value, value_states], dim=2)
             else:
-                cache_kwargs = {"sin": sin[:,:update_kvcache,:], "cos": cos[:,:update_kvcache,:], "cache_position": cache_position[:update_kvcache]}
-                # print("update_kvcache",update_kvcache)
-                new_key_states, new_value_states = past_key_value.update(key_states[:,:,:update_kvcache, :], value_states[:,:,:update_kvcache, : ], self.layer_idx, cache_kwargs)
-                # print("new_kv",new_key_states.shape,new_value_states.shape)
-                # print("k,v",new_key_states.shape,new_value_states.shape)
-                key_states = torch.cat([new_key_states,key_states[:,:,update_kvcache:,:]], dim=2)
-                value_states = torch.cat([new_value_states,value_states[:,:,update_kvcache:,:]], dim=2)
-                # print("k,v",key_states.shape,value_states.shape)
-        # print(key_states.shape,value_states.shape)
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+                cache_kwargs = {
+                    "sin": sin[:, :update_kvcache, :],
+                    "cos": cos[:, :update_kvcache, :],
+                }
+                if cache_position is not None:
+                    cache_kwargs["cache_position"] = cache_position[:update_kvcache]
+                new_key, new_value = past_key_value.update(
+                    key_states[:, :, :update_kvcache, :],
+                    value_states[:, :, :update_kvcache, :],
+                    self.layer_idx,
+                    cache_kwargs,
+                )
+                key_states = torch.cat([new_key, key_states[:, :, update_kvcache:, :]], dim=2)
+                value_states = torch.cat([new_value, value_states[:, :, update_kvcache:, :]], dim=2)
 
-        # causal_mask = attention_mask
+        allow_kernel_gqa = _SDPA_SUPPORTS_ENABLE_GQA and self.num_key_value_groups != 1
+        key_states_kernel = key_states if allow_kernel_gqa else repeat_kv(key_states, self.num_key_value_groups)
+        value_states_kernel = value_states if allow_kernel_gqa else repeat_kv(value_states, self.num_key_value_groups)
+        manual_key_states: Optional[torch.Tensor] = None if allow_kernel_gqa else key_states_kernel
+        manual_value_states: Optional[torch.Tensor] = None if allow_kernel_gqa else value_states_kernel
 
-        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
-        # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
-
-        # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
-        # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-        # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
-        # is_causal = True if causal_mask is None and q_len > 1 else False
-        # print(query_states.shape[2], key_states.shape[2])
-        # attention_mask=attention_mask[:,:, :key_states.shape[2], :key_states.shape[2]] if attention_mask is not None else None
-        # attn_output = flex_attention(query_states, key_states, value_states, block_mask= attention_mask ),
-        # print(query_states.shape, key_states.shape, value_states.shape, attention_mask.shape if attention_mask is not None else None)
-        # print(query_states.dtype,attention_mask.dtype if attention_mask is not None else None)
-        # print(self.training)
-        # print("key_states",key_states[:,:,:84,:])
-        # torch.save(key_states,"key_states1.pt")
-        # torch.save(value_states,"value_states1.pt")
-        # torch.save(value_states,"query_state1.pt")
-        # torch.save(attention_mask,"attention_mask1.pt")
-        # print(atte_mask.shape)
-        # Ensure the attention mask matches the actual key length after any cache updates/concats
+        mask = None
         if attention_mask is not None:
-            k_len = key_states.shape[-2]
-            q_len = query_states.shape[-2]
-            m = attention_mask
-            # Slice Q if longer than q_len
-            if m.shape[-2] > q_len:
-                m = m[:, :, :q_len, :]
-            # Adjust K dimension by slicing or padding with -inf on the right
-            if m.shape[-1] > k_len:
-                m = m[:, :, :, :k_len]
-            elif m.shape[-1] < k_len:
-                pad_k = k_len - m.shape[-1]
-                pad = m.new_full((m.shape[0], m.shape[1], m.shape[2], pad_k), float('-inf'))
-                m = torch.cat([m, pad], dim=-1)
-            atte_mask = m
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=atte_mask if attention_mask is not None else None,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=False, # hard coded
-        )
-        # print("attn_output",attn_output[:,:,:84,:],attn_output.shape)
-        # print(atte_mask[:,:,:84,:84],attenti_mask.shape)
-        # exit()
-        # if self.layer_idx==2:
-        # torch.save(attn_output,"attn_output2.pt")
-        # exit()
+            k_len = key_states_kernel.shape[-2]
+            q_mask = query_states.shape[-2]
+            mask = attention_mask
+            if mask.shape[-2] > q_mask:
+                mask = mask[:, :, :q_mask, :]
+            if mask.shape[-1] > k_len:
+                mask = mask[:, :, :, :k_len]
+            elif mask.shape[-1] < k_len:
+                pad = mask.new_full((mask.shape[0], mask.shape[1], mask.shape[2], k_len - mask.shape[-1]), float("-inf"))
+                mask = torch.cat([mask, pad], dim=-1)
+            if mask.device != query_states.device:
+                mask = mask.to(query_states.device)
+
+        if query_states.device.type == "cuda" and mask is not None:
+            query_states = query_states.contiguous()
+            key_states_kernel = key_states_kernel.contiguous()
+            value_states_kernel = value_states_kernel.contiguous()
+            mask = mask.contiguous()
+
+        attn_output = self._run_sage_attention(query_states, key_states_kernel, value_states_kernel, mask)
+        if attn_output is None:
+            attn_output = self._run_sdpa(query_states, key_states_kernel, value_states_kernel, mask)
+        if attn_output is None:
+            if manual_key_states is None:
+                manual_key_states = repeat_kv(key_states, self.num_key_value_groups)
+                manual_value_states = repeat_kv(value_states, self.num_key_value_groups)
+            attn_scores = torch.matmul(query_states, manual_key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+            if mask is not None:
+                attn_scores = attn_scores + mask
+            attn_probs = F.softmax(attn_scores, dim=-1, dtype=torch.float32).to(dtype=query_states.dtype)
+            attn_probs = F.dropout(attn_probs, p=self.attention_dropout, training=self.training)
+            attn_output = torch.matmul(attn_probs, manual_value_states)
+
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.hidden_size)
 
         attn_output = self.o_proj(attn_output)
 
+        if static_cache is not None and commit_len > 0 and commit_key_chunk is not None and commit_value_chunk is not None:
+            cache_update = static_cache.append(self.layer_idx, commit_key_chunk, commit_value_chunk)
+
+        if static_cache is not None:
+            return attn_output, None, cache_update
         return attn_output, None, past_key_value
 
 class DreamDecoderLayer(nn.Module):
@@ -643,18 +1134,19 @@ class DreamDecoderLayer(nn.Module):
                 f"Sliding Window Attention is enabled but not implemented for `{config._attn_implementation}`; "
                 "unexpected results may be encountered."
             )
-        
+
         # self.self_attn = Dream_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
-        self.self_attn = DreamFlexAttention(config, layer_idx)
+        self.self_attn = DreamFastAttention(config, layer_idx)
 
         self.mlp = DreamMLP(config)
         self.input_layernorm = DreamRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = DreamRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    @optional_compile()
     def forward(
         self,
         hidden_states: torch.Tensor,
-        update_kvcache: torch.int32 = None,
+        update_kvcache: Optional[int] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
@@ -744,6 +1236,23 @@ class DreamPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
     @classmethod
+    def _autoset_attn_implementation(cls, config, **kwargs):
+        alias_impls = {"sdpa_flash_attn", "sdpa_flash_attention"}
+        requested_impl = kwargs.pop("attn_implementation", None)
+        attn_impl = requested_impl or getattr(config, "attn_implementation", None)
+        preferred_impl = attn_impl
+        if attn_impl in alias_impls:
+            # Map alias names onto the SDPA implementation before delegating upstream.
+            setattr(config, "attn_implementation", "sdpa")
+            setattr(config, "_attn_implementation", "sdpa")
+        elif requested_impl is not None:
+            setattr(config, "attn_implementation", requested_impl)
+        result = super()._autoset_attn_implementation(config, **kwargs)
+        if preferred_impl in alias_impls:
+            setattr(config, "_dream_attn_preference", preferred_impl)
+        return result
+
+    @classmethod
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
@@ -759,6 +1268,13 @@ class DreamPreTrainedModel(PreTrainedModel):
         weights_only: bool = True,
         **kwargs,
     ):
+        attn_pref: Optional[str] = None
+        if "attn_implementation" in kwargs:
+            requested_attn = kwargs["attn_implementation"]
+            if requested_attn in {"sdpa_flash_attn", "sdpa_flash_attention"}:
+                attn_pref = requested_attn
+                kwargs["attn_implementation"] = "sdpa"
+
         _model = super().from_pretrained(
             pretrained_model_name_or_path,
             *model_args,
@@ -794,6 +1310,9 @@ class DreamPreTrainedModel(PreTrainedModel):
             _from_auto=from_auto_class,
             _from_pipeline=from_pipeline,
         )
+        if attn_pref is not None:
+            _model.config._attn_implementation = attn_pref
+            setattr(_model.config, "attn_implementation", attn_pref)
         return _model
 
 class DreamBaseModel(DreamPreTrainedModel):
@@ -819,6 +1338,10 @@ class DreamBaseModel(DreamPreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+        self.parallel_config: Optional[ParallelConfig] = None
+        # Shared cache gets allocated on demand for speculative decoding.
+        self.shared_kv_cache: Optional[SharedStaticCache] = None
+        self._max_cache_seq_len: Optional[int] = None
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -826,10 +1349,77 @@ class DreamBaseModel(DreamPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    def forward(
+    def prepare_kv_cache(
+        self,
+        max_seq_len: int,
+        *,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        if max_seq_len <= 0:
+            raise ValueError("max_seq_len must be positive when preparing KV cache")
+        device = device or next(self.parameters()).device
+        dtype = dtype or next(self.parameters()).dtype
+        num_layers = len(self.layers)
+        if num_layers == 0:
+            raise RuntimeError("Model has no decoder layers to prepare KV cache for")
+        attn_module = self.layers[0].self_attn
+        num_kv_heads = attn_module.num_key_value_heads
+        head_dim = attn_module.head_dim
+        self.shared_kv_cache = SharedStaticCache(
+            num_layers=num_layers,
+            num_key_value_heads=num_kv_heads,
+            max_seq_len=max_seq_len,
+            head_dim=head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        self._max_cache_seq_len = max_seq_len
+        for layer in self.layers:
+            setattr(layer, "kv_cache", self.shared_kv_cache)
+
+    def reset_shared_kv_cache(self) -> None:
+        if self.shared_kv_cache is not None:
+            self.shared_kv_cache.reset()
+
+    def get_shared_cache_length(self) -> int:
+        if self.shared_kv_cache is None:
+            return 0
+        return self.shared_kv_cache.get_seq_length()
+
+    def commit_kv_chunks(self, cache_updates: Optional[List[Optional[CacheUpdate]]]) -> Tuple[int, int]:
+        if self.shared_kv_cache is None or not cache_updates:
+            current_len = self.get_shared_cache_length()
+            return current_len, current_len
+        valid_updates = [update for update in cache_updates if update is not None]
+        if not valid_updates:
+            current_len = self.get_shared_cache_length()
+            return current_len, current_len
+        start = min(update.start for update in valid_updates)
+        end = max(update.end for update in valid_updates)
+        return start, end
+
+    def write_shared_kv_block(
+        self,
+        layer_idx: int,
+        start: int,
+        key_block: torch.Tensor,
+        value_block: torch.Tensor,
+    ) -> int:
+        if self.shared_kv_cache is None:
+            raise RuntimeError("Shared KV cache has not been initialised")
+        return self.shared_kv_cache.write_block(layer_idx, start, key_block, value_block)
+
+    def get_kv_block(self, layer_idx: int, start: int, end: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.shared_kv_cache is None:
+            raise RuntimeError("Shared KV cache has not been initialised")
+        return self.shared_kv_cache.get_block(layer_idx, start, end)
+
+    @optional_compile()
+    def _forward_standard(
         self,
         input_ids: torch.LongTensor = None,
-        update_kvcache: torch.int32 = None,
+        update_kvcache: Optional[int] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
@@ -864,8 +1454,17 @@ class DreamBaseModel(DreamPreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
             # print("inputs_embeds",inputs_embeds.shape)
         
+        static_cache_mode = False
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache()
+            if self.shared_kv_cache is not None:
+                past_key_values = self.shared_kv_cache
+            else:
+                past_key_values = DynamicCache()
+
+        if use_cache:
+            static_cache_mode = isinstance(past_key_values, SharedStaticCache)
+
+        cache_updates: Optional[List[Optional[CacheUpdate]]] = [] if (use_cache and static_cache_mode) else None
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -919,6 +1518,9 @@ class DreamBaseModel(DreamPreTrainedModel):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
+            if use_cache and cache_updates is not None:
+                cache_updates.append(layer_outputs[-1])
+
         hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
@@ -929,9 +1531,53 @@ class DreamBaseModel(DreamPreTrainedModel):
             return tuple(v for v in [hidden_states, all_hidden_states, all_self_attns] if v is not None)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=past_key_values if use_cache else None,
+            past_key_values=(cache_updates if cache_updates is not None else past_key_values) if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
+        )
+
+    @optional_compile()
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        update_kvcache: Optional[int] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        if self.parallel_config is None:
+            return self._forward_standard(
+                input_ids=input_ids,
+                update_kvcache=update_kvcache,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                cache_position=cache_position,
+            )
+
+        return self._forward_parallel(
+            input_ids=input_ids,
+            update_kvcache=update_kvcache,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
         )
 
 
@@ -970,11 +1616,42 @@ class DreamModel(DreamGenerationMixin, DreamPreTrainedModel):
     def get_decoder(self):
         return self.model
 
+    def allocate_shared_kv_cache(
+        self,
+        max_seq_len: int,
+        *,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        self.model.prepare_kv_cache(max_seq_len, device=device, dtype=dtype)
+
+    def reset_shared_kv_cache(self) -> None:
+        self.model.reset_shared_kv_cache()
+
+    def get_shared_cache_length(self) -> int:
+        return self.model.get_shared_cache_length()
+
+    def commit_shared_kv_chunks(self, cache_updates: Optional[List[Optional[CacheUpdate]]]) -> Tuple[int, int]:
+        return self.model.commit_kv_chunks(cache_updates)
+
+    def write_shared_kv_block(
+        self,
+        layer_idx: int,
+        start: int,
+        key_block: torch.Tensor,
+        value_block: torch.Tensor,
+    ) -> int:
+        return self.model.write_shared_kv_block(layer_idx, start, key_block, value_block)
+
+    def get_shared_kv_block(self, layer_idx: int, start: int, end: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.model.get_kv_block(layer_idx, start, end)
+
+    @optional_compile()
     def forward(
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
-        update_kvcache: torch.int32 = None,
+        update_kvcache: Optional[int] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,

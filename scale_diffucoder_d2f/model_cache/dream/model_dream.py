@@ -573,21 +573,8 @@ class DreamFlexAttention(DreamAttention):
 
         # causal_mask = attention_mask
         if attention_mask is not None:  # no matter the length, we just slice it
-            atte_mask = attention_mask[:,:, :, : key_states.shape[-2]].clone()
-            # print(update_kvcache,attention_mask.shape)
-            # if attention_mask.shape[3]>86+32:
-            # if attention_mask.shape[-1]!=attention_mask.shape[-2]:
-            #     atte_mask[:,:,:update_kvcache,-update_kvcache:]=-torch.inf
-            
-            # if update_kvcache > 0:
-            #     print("attention_mask中出现过的值",atte_mask.unique())
-                # print('tTTTTTTTTT')
-            # print("-"*20)
-            # print("attention_mask",attention_mask,update_kvcache)
-            # print(attention_mask)
-            # exit()
-            # print(attention_mask[0,0,:,:],attention_mask[0,0,:,:].shape)
-            # exit(0)
+            # Slice the attention mask to match the current key length after cache updates.
+            atte_mask = attention_mask[:, :, :, : key_states.shape[-2]].clone()
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.

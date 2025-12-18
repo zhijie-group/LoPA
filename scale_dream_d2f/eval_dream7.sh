@@ -47,7 +47,7 @@ humaneval_base_branch_competitions="true true true"
 humaneval_verification_force_base_winners="false false false"
 
 
-# 基础模型路径
+# Base model path
 base_model=/home/chenkai/data/models/Dream-v0-Instruct-7B
 
 lora_models=(
@@ -100,7 +100,7 @@ read -ra HUMANEVAL_BRANCH_VERIFICATION_MODES_ARRAY <<< "$humaneval_branch_verifi
 read -ra HUMANEVAL_BASE_BRANCH_COMPETITIONS_ARRAY <<< "$humaneval_base_branch_competitions"
 read -ra HUMANEVAL_VERIFICATION_FORCE_BASE_WINNERS_ARRAY <<< "$humaneval_verification_force_base_winners"
 
-# 验证所有数组长度是否一致
+# Validate that all main configuration arrays share the same length
 array_length=${#TASKS_ARRAY[@]}
 if [[ ${#NSHOTS_ARRAY[@]} -ne $array_length ]] || \
    [[ ${#LENGTH_ARRAY[@]} -ne $array_length ]] || \
@@ -113,12 +113,12 @@ if [[ ${#NSHOTS_ARRAY[@]} -ne $array_length ]] || \
    [[ ${#TOP_PS_ARRAY[@]} -ne $array_length ]] || \
    [[ ${#SAMPLING_STRATEGIES_ARRAY[@]} -ne $array_length ]] || \
    [[ ${#DTYPES_ARRAY[@]} -ne $array_length ]]; then
-    echo "错误：所有配置数组的长度必须相同！"
+    echo "Error: all configuration arrays must have the same length!"
     echo "Tasks: ${#TASKS_ARRAY[@]}, Nshots: ${#NSHOTS_ARRAY[@]}, Lengths: ${#LENGTH_ARRAY[@]}, Temperatures: ${#TEMP_ARRAY[@]}, Limits: ${#LIMITS_ARRAY[@]}, Block sizes: ${#BLOCK_SIZES_ARRAY[@]}, Block thresholds: ${#BLOCK_ADD_THRESHOLDS_ARRAY[@]}, Decoded token thresholds: ${#DECODED_TOKEN_THRESHOLDS_ARRAY[@]}, Skip thresholds: ${#SKIP_THRESHOLDS_ARRAY[@]}, Top_ps: ${#TOP_PS_ARRAY[@]}, Sampling strategies: ${#SAMPLING_STRATEGIES_ARRAY[@]}, Dtypes: ${#DTYPES_ARRAY[@]}"
     exit 1
 fi
 
-# 验证多分支参数数组长度是否一致
+# Validate that all multi-branch parameter arrays share the same length
 multibranch_array_length=${#MAX_BRANCHES_KEPTS_ARRAY[@]}
 if [[ ${#BRANCHING_FACTORS_ARRAY[@]} -ne $multibranch_array_length ]] || \
    [[ ${#BRANCH_TOPPS_ARRAY[@]} -ne $multibranch_array_length ]] || \
@@ -126,12 +126,12 @@ if [[ ${#BRANCHING_FACTORS_ARRAY[@]} -ne $multibranch_array_length ]] || \
    [[ ${#BRANCH_VERIFICATION_MODES_ARRAY[@]} -ne $multibranch_array_length ]] || \
    [[ ${#BASE_BRANCH_COMPETITIONS_ARRAY[@]} -ne $multibranch_array_length ]] || \
    [[ ${#VERIFICATION_FORCE_BASE_WINNERS_ARRAY[@]} -ne $multibranch_array_length ]]; then
-    echo "错误：所有多分支参数配置数组的长度必须相同！"
+    echo "Error: all multi-branch parameter arrays must have the same length!"
     echo "Max branches kept: ${#MAX_BRANCHES_KEPTS_ARRAY[@]}, Branching factors: ${#BRANCHING_FACTORS_ARRAY[@]}, Branch topps: ${#BRANCH_TOPPS_ARRAY[@]}, Selection conf alphas: ${#SELECTION_CONF_ALPHAS_ARRAY[@]}, Branch verification modes: ${#BRANCH_VERIFICATION_MODES_ARRAY[@]}, Base branch competitions: ${#BASE_BRANCH_COMPETITIONS_ARRAY[@]}, Verification force base winners: ${#VERIFICATION_FORCE_BASE_WINNERS_ARRAY[@]}"
     exit 1
 fi
 
-# 如果多分支参数只有一个配置，将其扩展到与主任务数组相同长度
+# If only one multi-branch configuration is provided, broadcast it to match the main task array length
 if [[ $multibranch_array_length -eq 1 && $array_length -gt 1 ]]; then
     max_branches_kept_single="${MAX_BRANCHES_KEPTS_ARRAY[0]}"
     branching_factor_single="${BRANCHING_FACTORS_ARRAY[0]}"
@@ -159,12 +159,12 @@ if [[ $multibranch_array_length -eq 1 && $array_length -gt 1 ]]; then
         VERIFICATION_FORCE_BASE_WINNERS_ARRAY+=("$verification_force_base_winner_single")
     done
 elif [[ $multibranch_array_length -ne $array_length ]]; then
-    echo "错误：多分支参数数组长度必须为1或与主任务数组长度相同！"
+    echo "Error: multi-branch parameter arrays must be length 1 or match the main task array length!"
     echo "Main tasks length: $array_length, Multi-branch params length: $multibranch_array_length"
     exit 1
 fi
 
-# 验证HumanEval数组长度是否一致
+# Validate that all HumanEval configuration arrays share the same length
 humaneval_array_length=${#HUMANEVAL_NSHOTS_ARRAY[@]}
 if [[ ${#HUMANEVAL_LENGTHS_ARRAY[@]} -ne $humaneval_array_length ]] || \
    [[ ${#HUMANEVAL_TEMP_ARRAY[@]} -ne $humaneval_array_length ]] || \
@@ -177,12 +177,12 @@ if [[ ${#HUMANEVAL_LENGTHS_ARRAY[@]} -ne $humaneval_array_length ]] || \
    [[ ${#HUMANEVAL_TOP_PS_ARRAY[@]} -ne $humaneval_array_length ]] || \
    [[ ${#HUMANEVAL_DTYPES_ARRAY[@]} -ne $humaneval_array_length ]] || \
    [[ ${#HUMANEVAL_SAMPLING_STRATEGIES_ARRAY[@]} -ne $humaneval_array_length ]]; then
-    echo "错误：所有HumanEval配置数组的长度必须相同！"
+    echo "Error: all HumanEval configuration arrays must have the same length!"
     echo "HumanEval Nshots: ${#HUMANEVAL_NSHOTS_ARRAY[@]}, Lengths: ${#HUMANEVAL_LENGTHS_ARRAY[@]}, Temperatures: ${#HUMANEVAL_TEMP_ARRAY[@]}, Limits: ${#HUMANEVAL_LIMITS_ARRAY[@]}, Diffusion steps: ${#HUMANEVAL_DIFFUSION_STEPS_ARRAY[@]}, Block sizes: ${#HUMANEVAL_BLOCK_SIZES_ARRAY[@]}, Block thresholds: ${#HUMANEVAL_BLOCK_ADD_THRESHOLDS_ARRAY[@]}, Decoded token thresholds: ${#HUMANEVAL_DECODED_TOKEN_THRESHOLDS_ARRAY[@]}, Skip thresholds: ${#HUMANEVAL_SKIP_THRESHOLDS_ARRAY[@]}, Top_ps: ${#HUMANEVAL_TOP_PS_ARRAY[@]}, Dtypes: ${#HUMANEVAL_DTYPES_ARRAY[@]}, Sampling strategies: ${#HUMANEVAL_SAMPLING_STRATEGIES_ARRAY[@]}"
     exit 1
 fi
 
-# 验证HumanEval多分支参数数组长度是否一致
+# Validate that all HumanEval multi-branch parameter arrays share the same length
 humaneval_multibranch_array_length=${#HUMANEVAL_MAX_BRANCHES_KEPTS_ARRAY[@]}
 if [[ ${#HUMANEVAL_BRANCHING_FACTORS_ARRAY[@]} -ne $humaneval_multibranch_array_length ]] || \
    [[ ${#HUMANEVAL_BRANCH_TOPPS_ARRAY[@]} -ne $humaneval_multibranch_array_length ]] || \
@@ -190,12 +190,12 @@ if [[ ${#HUMANEVAL_BRANCHING_FACTORS_ARRAY[@]} -ne $humaneval_multibranch_array_
    [[ ${#HUMANEVAL_BRANCH_VERIFICATION_MODES_ARRAY[@]} -ne $humaneval_multibranch_array_length ]] || \
    [[ ${#HUMANEVAL_BASE_BRANCH_COMPETITIONS_ARRAY[@]} -ne $humaneval_multibranch_array_length ]] || \
    [[ ${#HUMANEVAL_VERIFICATION_FORCE_BASE_WINNERS_ARRAY[@]} -ne $humaneval_multibranch_array_length ]]; then
-    echo "错误：所有HumanEval多分支参数配置数组的长度必须相同！"
+    echo "Error: all HumanEval multi-branch parameter arrays must have the same length!"
     echo "HumanEval Max branches kept: ${#HUMANEVAL_MAX_BRANCHES_KEPTS_ARRAY[@]}, Branching factors: ${#HUMANEVAL_BRANCHING_FACTORS_ARRAY[@]}, Branch topps: ${#HUMANEVAL_BRANCH_TOPPS_ARRAY[@]}, Selection conf alphas: ${#HUMANEVAL_SELECTION_CONF_ALPHAS_ARRAY[@]}, Branch verification modes: ${#HUMANEVAL_BRANCH_VERIFICATION_MODES_ARRAY[@]}, Base branch competitions: ${#HUMANEVAL_BASE_BRANCH_COMPETITIONS_ARRAY[@]}, Verification force base winners: ${#HUMANEVAL_VERIFICATION_FORCE_BASE_WINNERS_ARRAY[@]}"
     exit 1
 fi
 
-# 如果HumanEval多分支参数只有一个配置，将其扩展到与HumanEval主数组相同长度
+# If only one HumanEval multi-branch configuration is provided, broadcast it to match the HumanEval array length
 if [[ $humaneval_multibranch_array_length -eq 1 && $humaneval_array_length -gt 1 ]]; then
     humaneval_max_branches_kept_single="${HUMANEVAL_MAX_BRANCHES_KEPTS_ARRAY[0]}"
     humaneval_branching_factor_single="${HUMANEVAL_BRANCHING_FACTORS_ARRAY[0]}"
@@ -223,27 +223,27 @@ if [[ $humaneval_multibranch_array_length -eq 1 && $humaneval_array_length -gt 1
         HUMANEVAL_VERIFICATION_FORCE_BASE_WINNERS_ARRAY+=("$humaneval_verification_force_base_winner_single")
     done
 elif [[ $humaneval_multibranch_array_length -ne $humaneval_array_length ]]; then
-    echo "错误：HumanEval多分支参数数组长度必须为1或与HumanEval主数组长度相同！"
+    echo "Error: HumanEval multi-branch parameter arrays must be length 1 or match the HumanEval array length!"
     echo "HumanEval main length: $humaneval_array_length, HumanEval multi-branch params length: $humaneval_multibranch_array_length"
     exit 1
 fi
 
 export HF_ALLOW_CODE_EVAL=1
-# 对每个LoRA模型进行评测
+# Evaluate each LoRA model
 for lora_model in "${lora_models[@]}"; do
-    # 获取LoRA模型的基本名称用于输出目录
+    # Derive the LoRA model base name for the output directory
     lora_model_name="$lora_model"
     echo "===================================================================="
     echo "Evaluating LoRA model: $lora_model_name"
     echo "===================================================================="
     
-    # HumanEval评估（参数列表遍历）
+    # HumanEval evaluation (iterate over parameter lists)
     for i in "${!HUMANEVAL_NSHOTS_ARRAY[@]}"; do
         output_path="eval_dream_all${lora_model_name}/humaneval-ns${HUMANEVAL_NSHOTS_ARRAY[$i]}-len${HUMANEVAL_LENGTHS_ARRAY[$i]}-temp${HUMANEVAL_TEMP_ARRAY[$i]}-limit${HUMANEVAL_LIMITS_ARRAY[$i]}-diffsteps${HUMANEVAL_DIFFUSION_STEPS_ARRAY[$i]}-block${HUMANEVAL_BLOCK_SIZES_ARRAY[$i]}-thresh${HUMANEVAL_BLOCK_ADD_THRESHOLDS_ARRAY[$i]}-decodethresh${HUMANEVAL_DECODED_TOKEN_THRESHOLDS_ARRAY[$i]}-skip${HUMANEVAL_SKIP_THRESHOLDS_ARRAY[$i]}-topp${HUMANEVAL_TOP_PS_ARRAY[$i]}-dtype${HUMANEVAL_DTYPES_ARRAY[$i]}-sampling${HUMANEVAL_SAMPLING_STRATEGIES_ARRAY[$i]}-maxbranch${HUMANEVAL_MAX_BRANCHES_KEPTS_ARRAY[$i]}-branchfactor${HUMANEVAL_BRANCHING_FACTORS_ARRAY[$i]}-branchtopp${HUMANEVAL_BRANCH_TOPPS_ARRAY[$i]}-selconfal${HUMANEVAL_SELECTION_CONF_ALPHAS_ARRAY[$i]}-branchverify${HUMANEVAL_BRANCH_VERIFICATION_MODES_ARRAY[$i]}-basecompete${HUMANEVAL_BASE_BRANCH_COMPETITIONS_ARRAY[$i]}-forcebase${HUMANEVAL_VERIFICATION_FORCE_BASE_WINNERS_ARRAY[$i]}"
         echo "Running HumanEval evaluation $((i+1))/${humaneval_array_length} for $lora_model_name..."
         echo "HumanEval Config: Shots: ${HUMANEVAL_NSHOTS_ARRAY[$i]}, Length: ${HUMANEVAL_LENGTHS_ARRAY[$i]}, Temperature: ${HUMANEVAL_TEMP_ARRAY[$i]}, Limit: ${HUMANEVAL_LIMITS_ARRAY[$i]}, Diffusion Steps: ${HUMANEVAL_DIFFUSION_STEPS_ARRAY[$i]}, Block Size: ${HUMANEVAL_BLOCK_SIZES_ARRAY[$i]}, Block Add Threshold: ${HUMANEVAL_BLOCK_ADD_THRESHOLDS_ARRAY[$i]}, Decoded Token Threshold: ${HUMANEVAL_DECODED_TOKEN_THRESHOLDS_ARRAY[$i]}, Skip Threshold: ${HUMANEVAL_SKIP_THRESHOLDS_ARRAY[$i]}, Top_p: ${HUMANEVAL_TOP_PS_ARRAY[$i]}, Sampling Strategy: ${HUMANEVAL_SAMPLING_STRATEGIES_ARRAY[$i]}, Dtype: ${HUMANEVAL_DTYPES_ARRAY[$i]}, Max Branches: ${HUMANEVAL_MAX_BRANCHES_KEPTS_ARRAY[$i]}, Branching Factor: ${HUMANEVAL_BRANCHING_FACTORS_ARRAY[$i]}, Branch Topp: ${HUMANEVAL_BRANCH_TOPPS_ARRAY[$i]}, Selection Conf Alpha: ${HUMANEVAL_SELECTION_CONF_ALPHAS_ARRAY[$i]}, Branch Verification: ${HUMANEVAL_BRANCH_VERIFICATION_MODES_ARRAY[$i]}, Base Competition: ${HUMANEVAL_BASE_BRANCH_COMPETITIONS_ARRAY[$i]}, Force Base Winner: ${HUMANEVAL_VERIFICATION_FORCE_BASE_WINNERS_ARRAY[$i]}; Output: $output_path"
         
-        # 构建HumanEval的model_args，根据top_p是否为none来决定是否包含top_p参数，并添加多分支参数
+        # Build HumanEval model_args, including multi-branch params and optional top_p
         if [[ "${HUMANEVAL_TOP_PS_ARRAY[$i]}" == "none" ]]; then
             humaneval_model_args="pretrained=${base_model},lora_path=${lora_model},max_new_tokens=${HUMANEVAL_LENGTHS_ARRAY[$i]},diffusion_steps=${HUMANEVAL_DIFFUSION_STEPS_ARRAY[$i]},temperature=${HUMANEVAL_TEMP_ARRAY[$i]},add_bos_token=true,escape_until=true,block_size=${HUMANEVAL_BLOCK_SIZES_ARRAY[$i]},block_add_threshold=${HUMANEVAL_BLOCK_ADD_THRESHOLDS_ARRAY[$i]},skip_threshold=${HUMANEVAL_SKIP_THRESHOLDS_ARRAY[$i]},decoded_token_threshold=${HUMANEVAL_DECODED_TOKEN_THRESHOLDS_ARRAY[$i]},dtype=${HUMANEVAL_DTYPES_ARRAY[$i]},sampling_strategy=${HUMANEVAL_SAMPLING_STRATEGIES_ARRAY[$i]},max_branches_kept=${HUMANEVAL_MAX_BRANCHES_KEPTS_ARRAY[$i]},branching_factor=${HUMANEVAL_BRANCHING_FACTORS_ARRAY[$i]},branch_topp=${HUMANEVAL_BRANCH_TOPPS_ARRAY[$i]},selection_conf_alpha=${HUMANEVAL_SELECTION_CONF_ALPHAS_ARRAY[$i]},branch_verification_mode=${HUMANEVAL_BRANCH_VERIFICATION_MODES_ARRAY[$i]},base_branch_competition=${HUMANEVAL_BASE_BRANCH_COMPETITIONS_ARRAY[$i]},verification_force_base_winner=${HUMANEVAL_VERIFICATION_FORCE_BASE_WINNERS_ARRAY[$i]},save_dir=${output_path}"
         else
@@ -260,13 +260,13 @@ for lora_model in "${lora_models[@]}"; do
             --confirm_run_unsafe_code
     done
 
-    # 其他任务的评估
+    # Evaluate other tasks
     for i in "${!TASKS_ARRAY[@]}"; do
         # Create comprehensive output path with all hyperparameters including LoRA-specific info and multi-branch params
         output_path="eval_dream_all${lora_model_name}/${TASKS_ARRAY[$i]}-ns${NSHOTS_ARRAY[$i]}-len${LENGTH_ARRAY[$i]}-temp${TEMP_ARRAY[$i]}-limit${LIMITS_ARRAY[$i]}-diffsteps${LENGTH_ARRAY[$i]}-block${BLOCK_SIZES_ARRAY[$i]}-thresh${BLOCK_ADD_THRESHOLDS_ARRAY[$i]}-decodethresh${DECODED_TOKEN_THRESHOLDS_ARRAY[$i]}-skip${SKIP_THRESHOLDS_ARRAY[$i]}-topp${TOP_PS_ARRAY[$i]}-dtype${DTYPES_ARRAY[$i]}-sampling${SAMPLING_STRATEGIES_ARRAY[$i]}-maxbranch${MAX_BRANCHES_KEPTS_ARRAY[$i]}-branchfactor${BRANCHING_FACTORS_ARRAY[$i]}-branchtopp${BRANCH_TOPPS_ARRAY[$i]}-selconfal${SELECTION_CONF_ALPHAS_ARRAY[$i]}-branchverify${BRANCH_VERIFICATION_MODES_ARRAY[$i]}-basecompete${BASE_BRANCH_COMPETITIONS_ARRAY[$i]}-forcebase${VERIFICATION_FORCE_BASE_WINNERS_ARRAY[$i]}"
         echo "Task: ${TASKS_ARRAY[$i]}, Shots: ${NSHOTS_ARRAY[$i]}, Length: ${LENGTH_ARRAY[$i]}, Temperature: ${TEMP_ARRAY[$i]}, Limit: ${LIMITS_ARRAY[$i]}, Block Size: ${BLOCK_SIZES_ARRAY[$i]}, Block Add Threshold: ${BLOCK_ADD_THRESHOLDS_ARRAY[$i]}, Decoded Token Threshold: ${DECODED_TOKEN_THRESHOLDS_ARRAY[$i]}, Skip Threshold: ${SKIP_THRESHOLDS_ARRAY[$i]}, Top_p: ${TOP_PS_ARRAY[$i]}, Sampling Strategy: ${SAMPLING_STRATEGIES_ARRAY[$i]}, Dtype: ${DTYPES_ARRAY[$i]}, Max Branches: ${MAX_BRANCHES_KEPTS_ARRAY[$i]}, Branching Factor: ${BRANCHING_FACTORS_ARRAY[$i]}, Branch Topp: ${BRANCH_TOPPS_ARRAY[$i]}, Selection Conf Alpha: ${SELECTION_CONF_ALPHAS_ARRAY[$i]}, Branch Verification: ${BRANCH_VERIFICATION_MODES_ARRAY[$i]}, Base Competition: ${BASE_BRANCH_COMPETITIONS_ARRAY[$i]}, Force Base Winner: ${VERIFICATION_FORCE_BASE_WINNERS_ARRAY[$i]}; Output: $output_path"
         
-        # 构建model_args，根据top_p是否为none来决定是否包含top_p参数，并添加多分支参数
+        # Build model_args with optional top_p and multi-branch params
         if [[ "${TOP_PS_ARRAY[$i]}" == "none" ]]; then
             model_args="pretrained=${base_model},lora_path=${lora_model},max_new_tokens=${LENGTH_ARRAY[$i]},diffusion_steps=${LENGTH_ARRAY[$i]},add_bos_token=true,temperature=${TEMP_ARRAY[$i]},block_size=${BLOCK_SIZES_ARRAY[$i]},block_add_threshold=${BLOCK_ADD_THRESHOLDS_ARRAY[$i]},skip_threshold=${SKIP_THRESHOLDS_ARRAY[$i]},decoded_token_threshold=${DECODED_TOKEN_THRESHOLDS_ARRAY[$i]},dtype=${DTYPES_ARRAY[$i]},sampling_strategy=${SAMPLING_STRATEGIES_ARRAY[$i]},max_branches_kept=${MAX_BRANCHES_KEPTS_ARRAY[$i]},branching_factor=${BRANCHING_FACTORS_ARRAY[$i]},branch_topp=${BRANCH_TOPPS_ARRAY[$i]},selection_conf_alpha=${SELECTION_CONF_ALPHAS_ARRAY[$i]},branch_verification_mode=${BRANCH_VERIFICATION_MODES_ARRAY[$i]},base_branch_competition=${BASE_BRANCH_COMPETITIONS_ARRAY[$i]},verification_force_base_winner=${VERIFICATION_FORCE_BASE_WINNERS_ARRAY[$i]},save_dir=${output_path}"
         else

@@ -1,0 +1,31 @@
+[project]
+name = "lopa"
+version = "0.1.0"
+description = "LoPA: Scaling dLLM Inference via Lookahead Parallel Decoding"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "transformers==4.49.0",
+    "lm_eval==0.4.8",
+    "accelerate==0.34.2",
+    "antlr4-python3-runtime==4.11",
+    "math_verify",
+    "sympy",
+    "hf_xet",
+    "pydantic==2.10.6",
+    "gradio",
+    "nvitop>=1.5.3",
+    "keep-gpu>=0.3.1",
+    "uv>=0.9.11",
+    "matplotlib>=3.10.7",
+    "seaborn>=0.13.2",
+    "pandas>=2.3.3",
+    "numpy>=2.3.3",
+]
+
+[tool.setuptools.packages.find]
+include = []
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple"
+default = true
