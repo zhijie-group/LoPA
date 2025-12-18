@@ -6,7 +6,6 @@
   <a href="https://huggingface.co/SJTU-Deng-Lab"><b>🤗 Hugging Face</b></a>
 </p>
 
-
 <p align="center">
   <br>
   <small><b>Throughput Performance of LoPA:</b> LoPA accelerates the single-sample throughput for D2F-Dream to up to <b>1073.9 tokens/s</b> and <b>856.5 tokens/s</b> on MBPP and GSM8K respectively, significantly outperforming baselines.</small>
@@ -15,6 +14,12 @@
 <hr>
 
 **Lookahead Parallel Decoding (LoPA)** is a training-free, plug-and-play algorithm designed to break the parallelism bottleneck in Diffusion Large Language Models (dLLMs). By identifying that parallelism is highly sensitive to the Token Filling Order (TFO), LoPA actively searches for optimal TFOs to maximize future confidence.
+
+<p align="center">
+  <img src="docs/assets/img/figure1.png" width="800" alt="Illustration of diffusion LLM inference challenges">
+  <br>
+  <small><b>Figure 1:</b> Illustration of diffusion LLM inference challenges. Parallelism fluctuates sharply with prediction confidence and Token Filling Order (TFO).</small>
+</p>
 
 Key features of LoPA include:
 - **Massive Speedup:** Increases the Tokens Per Forward pass (TPF) of **D2F-Dream** to **10.1** on GSM8K and **D2F-DiffuCoder** to **8.3** on HumanEval+.
@@ -34,16 +39,36 @@ Key features of LoPA include:
 
 ## 🤔 How It Works
 
-Standard dLLM decoding greedily fills tokens with the highest current confidence, which often leads to suboptimal paths that restrict future parallelism. LoPA solves this by "looking ahead":
+Standard dLLM decoding greedily fills tokens with the highest current confidence. While effective for single steps, this often leads to suboptimal paths that restrict future parallelism. 
 
-1.  **Anchor Branch:** Maintains the standard confidence-driven path.
-2.  **Lookahead Branches:** Spawns $k$ parallel branches exploring alternative high-confidence Token Filling Orders (TFOs).
-3.  **Parallel Verification:** Verifies all branches in a single forward pass and selects the one with the highest **Branch Confidence** (potential for future parallelism).
+<p align="center">
+  <img src="docs/assets/img/figure2.png" width="800" alt="Standard confidence-driven sampling">
+  <br>
+  [cite_start]<small><b>Figure 2:</b> The architecture of standard confidence-driven sampling[cite: 52, 53].</small>
+</p>
+
+LoPA solves this by "looking ahead" to explore superior Token Filling Orders (TFOs):
+
+1. **Anchor Branch:** Maintains the standard confidence-driven path.
+2. **Lookahead Branches:** Spawns $k$ parallel branches exploring alternative high-confidence TFOs.
+3. **Parallel Verification:** Verifies all branches in a single forward pass and selects the one with the highest **Branch Confidence** (potential for future parallelism).
+
+<p align="center">
+  <img src="docs/assets/img/figure3.png" width="800" alt="Overview of LoPA">
+  <br>
+  <small><b>Figure 3:</b> Overview of the LoPA algorithm. [cite_start]LoPA concurrently explores distinct candidate TFOs via parallel branches and selects the one with the highest potential for future parallelism[cite: 54, 55].</small>
+</p>
 
 
 ## 📊 Performance Highlights
 
 LoPA demonstrates significant improvements in Tokens Per Forward pass (TPF) and overall throughput across mathematical reasoning and code generation tasks.
+
+<p align="center">
+  <img src="docs/assets/img/figure4.png" width="800" alt="TPF Scaling and Accuracy Performance">
+  <br>
+  <small><b>Figure 4:</b> TPF Scaling and Accuracy Performance on GSM8K and HumanEval+. [cite_start]LoPA establishes a clear, controllable speed-accuracy trade-off[cite: 49].</small>
+</p>
 
 <center>
 
@@ -120,6 +145,12 @@ LoPA demonstrates significant improvements in Tokens Per Forward pass (TPF) and 
 </table>
 
 </center>
+
+<p align="center">
+  <img src="docs/assets/img/figure5.png" width="800" alt="Additional Results">
+  <br>
+  [cite_start]<small><b>Figure 5:</b> Scaling analysis of LoPA on D2F-Dream with varying branch counts[cite: 353].</small>
+</p>
 
 ## 🚀 Usage Guide
 
@@ -206,4 +237,6 @@ If you find LoPA useful for your research, please cite our paper:
 
 ```
 
+```
 
+```
