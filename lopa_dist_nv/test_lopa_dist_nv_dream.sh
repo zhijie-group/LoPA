@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
 TARGET_SCRIPT="${ROOT_DIR}/generate_branch_parallel.py"
@@ -14,7 +14,7 @@ export HF_ALLOW_CODE_EVAL="1"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export PYTHONUNBUFFERED="1"
 export DIST_BACKEND="nccl"
-export HF_HOME="${HF_HOME:}"
+export HF_HOME="${HF_HOME:"${ROOT_DIR}../cache"}"
 # export HF_HOME="/root/autodl-tmp/D2F-Plus-Plus/.cache"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export D2F_CUDA_CLEANUP_FREE_RATIO="${D2F_CUDA_CLEANUP_FREE_RATIO:-0.20}"
@@ -83,8 +83,8 @@ mkdir -p "${RESULT_ROOT}" "${OUTPUT_ROOT}" "${LOG_DIR}"
 # Base model / LoRA configuration
 # --------------------------------------------------------------------------------------
 
-MODEL_PRETRAINED=${MODEL_PRETRAINED:}
-MODEL_LORA_PATH_DEFAULT=${MODEL_LORA_PATH_DEFAULT:}
+MODEL_PRETRAINED=${MODEL_PRETRAINED:"/root/data/ckpts/Dream-org/Dream-v0-Instruct-7B"}
+MODEL_LORA_PATH_DEFAULT=${MODEL_LORA_PATH_DEFAULT:"/root/data/ckpts/SJTU-Deng-Lab/D2F_Dream_v0_Instruct_LoRA"}
 LORA_MODELS_INPUT="${LORA_MODELS:-${MODEL_LORA_PATH_DEFAULT}}"
 read -r -a LORA_MODELS <<< "${LORA_MODELS_INPUT}"
 if [[ ${#LORA_MODELS[@]} -eq 0 ]]; then

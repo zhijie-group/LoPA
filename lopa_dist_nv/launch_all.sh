@@ -5,13 +5,13 @@
 # ====================================================
 
 # If your machine is offline, you can set the following environment variables to true
-# export HF_HUB_OFFLINE=1
-# export HF_DATASETS_OFFLINE=1
-# export HF_EVALUATE_OFFLINE=1
-# export TRANSFORMERS_OFFLINE=1
-# export WANDB_DISABLED=true
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export HF_EVALUATE_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export WANDB_DISABLED=true
 
-export HF_HOME="<YOUR_HF_HOME>"
+export HF_HOME="/root/workspace/jyj/LoPA/cache"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export HF_METRICS_CACHE="$HF_HOME/metrics"
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
@@ -41,19 +41,19 @@ MODES=(
 
 # Define branch sizes to run: 4 then 8
 BRANCH_SIZES=(4 8)
-
+MODEL_DIR_PATH=/root/data/ckpts
 for MODE in "${MODES[@]}"; do
     # --- Set model paths for the current mode ---
     export RUN_MODE="$MODE"
     
     if [ "$RUN_MODE" = "instruct" ]; then
         echo ">>> Setting up for INSTRUCT mode..."
-        export MODEL_PRETRAINED="Dream-org/Dream-v0-Instruct-7B"
-        export MODEL_LORA_PATH_DEFAULT="SJTU-Deng-Lab/D2F_Dream_v0_Instruct_LoRA"
+        export MODEL_PRETRAINED="$MODEL_DIR_PATH/Dream-org/Dream-v0-Instruct-7B"
+        export MODEL_LORA_PATH_DEFAULT="$MODEL_DIR_PATH/SJTU-Deng-Lab/D2F_Dream_v0_Instruct_LoRA"
     elif [ "$RUN_MODE" = "base" ]; then
         echo ">>> Setting up for BASE mode..."
-        export MODEL_PRETRAINED="Dream-org/Dream-v0-Base-7B"
-        export MODEL_LORA_PATH_DEFAULT="SJTU-Deng-Lab/D2F_Dream_v0_Base_Lora"
+        export MODEL_PRETRAINED="$MODEL_DIR_PATH/Dream-org/Dream-v0-Base-7B"
+        export MODEL_LORA_PATH_DEFAULT="$MODEL_DIR_PATH/SJTU-Deng-Lab/D2F_Dream_v0_Base_Lora"
     else
         echo "Error: Unknown mode $RUN_MODE"
         exit 1
@@ -74,7 +74,7 @@ for MODE in "${MODES[@]}"; do
 
         # --- Run experiment script ---
         # Use 2>&1 | tee to output to both screen and file
-        test_lopa_dist_nv_dream.sh 2>&1 | tee "log/${LOG_NAME}"
+        ./test_lopa_dist_nv_dream.sh 2>&1 | tee "log/${LOG_NAME}"
         
         # Check exit status of the previous command (optional)
         if [ ${PIPESTATUS[0]} -ne 0 ]; then

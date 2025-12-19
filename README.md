@@ -320,19 +320,27 @@ The system distributes candidate branches across multiple GPUs for concurrent pr
 
 First, clone the repository and install the dependencies.
 
+#### UV Setup (Recommended)
+
 ```shell
 # Clone the repository
 git clone https://github.com/zhijie-group/LoPA.git
 cd LoPA
 
-# Create environment (Recommended)
+# Init the project
+uv sync
+source .venv/bin/activate
+```
+
+#### Conda Setup
+
+```shell
+# Create environment
 conda create -n lopa python=3.10
 conda activate lopa
 
 # Install dependencies
 pip install -r requirements.txt
-
-
 ```
 
 ### 2. Running Experiments
@@ -353,16 +361,12 @@ cd scale_diffucoder_d2f
 
 ```shell
 bash test_diffucoder_lopa_humaneval.sh
-
-
 ```
 
 **Run LoPA on MBPP:**
 
 ```shell
 bash test_diffucoder_lopa_mbpp.sh
-
-
 ```
 
 *Note: You can also run the standard D2F baselines using the `test_diffucoder_d2f_*.sh` scripts provided in the same folder.*
@@ -373,16 +377,12 @@ To evaluate **D2F-Dream** (optimized for mathematical reasoning and general task
 
 ```shell
 cd scale_dream_d2f
-
-
 ```
 
 **Run Dream Evaluation:**
 
 ```shell
 bash test_dream_d2f_LoPA.sh
-
-
 ```
 
 ## ©️ Citation
@@ -399,7 +399,4 @@ If you find LoPA useful for your research, please cite our paper:
       primaryClass={cs.CL},
       url={https://arxiv.org/abs/2512.16229}, 
 }
-
 ```
-
-
