@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://arxiv.org/abs/2512.16229">📄 Paper</a> •
   <a href="https://zhijie-group.github.io/blogs/lopa/">📝 Blog</a> •
-  <a href="https://github.com/zhijie-group/LoPA">💻 GitHub</a> •
+  <a href="https://github.com/zhijie-group/Diffulex">🚀 Engine</a> •
   <a href="https://huggingface.co/SJTU-Deng-Lab">🤗 Hugging Face</a>
 </p>
 
@@ -78,7 +78,7 @@ LoPA demonstrates significant improvements in Tokens Per Forward pass (TPF) and 
 
 
 
-<small style="color: gray;">Figure 3. Scaling Curves of LoPA. LoPA scales the tokens per forward pass (TPS) for D2F-Dream and D2F-DiffuCoder to up to 10.1 and 8.3 on GSM8k and HumanEval+ respectively, with comparable performance.</small>
+<small style="color: gray;">Figure 3. Scaling Curves of LoPA. LoPA scales the TPF for D2F-Dream and D2F-DiffuCoder to up to 10.1 and 8.3 on GSM8k and HumanEval+ respectively, with comparable performance.</small>
 </p>
 
 <p align="center">
@@ -414,4 +414,6 @@ If you find LoPA useful for your research, please cite our paper:
       primaryClass={cs.CL},
       url={https://arxiv.org/abs/2512.16229}, 
 }
+
 ```
+
