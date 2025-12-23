@@ -3,7 +3,7 @@
 </div>
 
 <p align="center">
-  <a href="paper/LoPA.pdf">📄 Paper</a> •
+  <a href="https://arxiv.org/abs/2512.16229">📄 Paper</a> •
   <a href="https://zhijie-group.github.io/blogs/lopa/">📝 Blog</a> •
   <a href="https://github.com/zhijie-group/Diffulex">🚀 Engine</a> •
   <a href="https://huggingface.co/SJTU-Deng-Lab">🤗 Hugging Face</a>
@@ -847,4 +847,5 @@ If you find LoPA useful for your research, please cite our paper:
 }
 
 ```
+
 
