@@ -6,8 +6,8 @@ set -euo pipefail
 # for every combo and writes results into OUTPUT_DIR/<dataset>/<run_dir_name>.
 
 # --- User-editable configuration (no CLI args required) ---
-BASE_MODEL_PATH="/home/chenkai/data/models/DiffuCoder-7B-Instruct"
-LORA_PATH="/home/chenkai/data/ckpt/diffucoder_wx"
+BASE_MODEL_PATH="DiffuCoder-7B-Instruct"
+LORA_PATH="SJTU-Deng-Lab/D2F_DiffuCoder_Instruct_7B_Lora"
 TP=1
 OUTPUT_DIR="results/diffucoder_lopa_32_0.95_0.95_0.3_new"
 DEVICE="cuda:3"
