@@ -4,8 +4,8 @@
 
 <p align="center">
   <a href="https://arxiv.org/abs/2512.16229">📄 Paper</a> •
-  <a href="https://zhijie-group.github.io/blogs/lopa/">📝 Blog</a> •
-  <a href="https://github.com/zhijie-group/Diffulex">🚀 Engine</a> •
+  <a href="https://SJTU-DENG-Lab.github.io/blogs/lopa/">📝 Blog</a> •
+  <a href="https://github.com/SJTU-DENG-Lab/Diffulex">🚀 Engine</a> •
   <a href="https://huggingface.co/SJTU-Deng-Lab/D2F_Dream_Instruct_7B_Lora/tree/main">🤗 D2F_Dream_Instruct_7B_Lora</a> •
   <a href="https://huggingface.co/SJTU-Deng-Lab/D2F_DiffuCoder_Instruct_7B_Lora/tree/main">🤗 D2F_DiffuCoder_Instruct_7B_Lora</a>
 </p>
@@ -42,7 +42,7 @@ Key features of LoPA include:
 
 ## 🔮 Future Works
 
-* **Diffulex:** We are working on a new inference framework for dLLMs, which is flexible and easy to extend. Diffulex supports multiple decoding strategies including D2F, BlockDiffusion, and Fast-dLLM-v2, which is soon to be released. **You can find the code [here](https://github.com/zhijie-group/Diffulex).**
+* **Diffulex:** We are working on a new inference framework for dLLMs, which is flexible and easy to extend. Diffulex supports multiple decoding strategies including D2F, BlockDiffusion, and Fast-dLLM-v2, which is soon to be released. **You can find the code [here](https://github.com/SJTU-DENG-Lab/Diffulex).**
 
 * **LoPA-SDAR:** We will explore adapting LoPA to SDAR and other confidence-driven diffusion language models to further demonstrate its generalizability and effectiveness across diverse model architectures.
 
@@ -763,7 +763,7 @@ First, clone the repository and install the dependencies.
 
 ```shell
 # Clone the repository
-git clone https://github.com/zhijie-group/LoPA.git
+git clone https://github.com/SJTU-DENG-Lab/LoPA.git
 cd LoPA
 
 # Init the project
@@ -852,6 +852,7 @@ If you find LoPA useful for your research, please cite our paper:
 }
 
 ```
+
 
 
 
